@@ -1,0 +1,15 @@
+# Deploy the Q-BioVision FastAPI backend on Render (free tier works).
+services:
+  - type: web
+    name: q-biovision-api
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    healthCheckPath: /api/health
+    envVars:
+      - key: DEMO_MODE
+        value: "true"
+      - key: CORS_ORIGINS
+        value: "https://q-biovision.vercel.app"
+      - key: RELOAD
+        value: "0"

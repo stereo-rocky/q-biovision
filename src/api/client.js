@@ -1,17 +1,36 @@
 // ================================================================
-// src/api/client.js — Axios API client for Q-BioVision backend
-// All requests proxy to http://localhost:8000 via Vite proxy config
+// src/api/client.js - Axios API client for Q-BioVision backend
+//
+// Base URL resolution order:
+//   1. VITE_API_URL          (build-time env var, set in Vercel dashboard)
+//   2. ""  (same-origin)     -> dev: Vite proxy, prod: vercel.json rewrites
+//
+// Every endpoint path below already starts with "/api", so VITE_API_URL
+// must be the backend ORIGIN only (e.g. https://q-biovision.onrender.com),
+// never ".../api".
 // ================================================================
 import axios from 'axios'
+
+// ---------------------------------------------------------------------------
+// Resolve + normalise the API base URL
+// ---------------------------------------------------------------------------
+function resolveBaseURL() {
+  const raw = (import.meta.env?.VITE_API_URL ?? '').trim()
+  if (!raw) return ''                       // same-origin (proxy / rewrite)
+  // strip trailing slashes and an accidental trailing "/api"
+  return raw.replace(/\/+$/, '').replace(/\/api$/, '')
+}
+
+export const API_BASE_URL = resolveBaseURL()
 
 // ---------------------------------------------------------------------------
 // Base Axios instance
 // ---------------------------------------------------------------------------
 const apiClient = axios.create({
-  baseURL: '/',          // Vite proxies /api/* -> http://localhost:8000
-  timeout: 60000,        // 60 second timeout for long-running quantum jobs
+  baseURL: API_BASE_URL,
+  timeout: 120000,       // quantum jobs can be slow (cold starts included)
   headers: {
-    'Accept': 'application/json',
+    Accept: 'application/json',
   },
 })
 
@@ -34,11 +53,28 @@ apiClient.interceptors.request.use(
 apiClient.interceptors.response.use(
   (response) => response,
   (error) => {
-    const message =
+    const status = error.response?.status
+    const url = `${error.config?.baseURL || ''}${error.config?.url || ''}`
+
+    let message =
       error.response?.data?.detail ||
       error.response?.data?.message ||
       error.message ||
       'Unknown API error'
+
+    if (status === 404) {
+      message =
+        `API route not found (404) at "${url}". ` +
+        (API_BASE_URL
+          ? 'Check that VITE_API_URL points at a running Q-BioVision backend.'
+          : 'Set VITE_API_URL, or add the /api rewrite in vercel.json, so requests reach the FastAPI backend.')
+    } else if (error.code === 'ERR_NETWORK') {
+      message =
+        'Cannot reach the Q-BioVision backend. ' +
+        `Is it running at "${API_BASE_URL || window.location.origin}"? (CORS or server down)`
+    } else if (error.code === 'ECONNABORTED') {
+      message = 'Request timed out. The quantum job took longer than 120s.'
+    }
     console.error(`[API Error] ${message}`, error.response?.data)
     return Promise.reject(new Error(message))
   }
@@ -54,9 +90,36 @@ apiClient.interceptors.response.use(
  * @returns {Promise<{original_b64, feature_map_b64, patch_grid_b64, quantum_features, n_qubits}>}
  */
 export async function preprocessImage(formData) {
-  const response = await apiClient.post('/api/preprocess', formData, {
+  // Normalise field names the backend expects:
+  //   file        -> uploaded image (UploadFile)
+  //   dataset_name-> demo sample id
+  //   n_qubits    -> int
+  if (formData.has('dataset') && !formData.has('dataset_name')) {
+    formData.append('dataset_name', formData.get('dataset'))
+  }
+  const response = await apiClient.post('/api/encode', formData, {
     headers: { 'Content-Type': 'multipart/form-data' },
   })
+  return response.data
+}
+
+/** Alias used by the "Encode & Analyze" button. */
+export const encodeImage = preprocessImage
+
+/**
+ * One-shot encode + classify. Returns the encode payload merged with
+ * { prediction, label_name, confidence, probabilities }.
+ */
+export async function analyzeImage(formData) {
+  const response = await apiClient.post('/api/analyze', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  })
+  return response.data
+}
+
+/** Backend liveness probe - useful for a connection banner in the UI. */
+export async function checkHealth() {
+  const response = await apiClient.get('/api/health')
   return response.data
 }
 

@@ -18,7 +18,9 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from config import (
+    API_PORT,
     API_VERSION,
+    CORS_ORIGIN_REGEX,
     CORS_ORIGINS,
     DEFAULT_N_QUBITS,
     DEMO_MODE,
@@ -54,6 +56,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
+    allow_origin_regex=CORS_ORIGIN_REGEX,   # allows every *.vercel.app deployment
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -127,6 +130,17 @@ async def health_check():
     }
 
 
+@app.get("/api/health", tags=["Health"])
+async def api_health_check():
+    """Health check under the /api prefix (what the frontend probes)."""
+    return {
+        "status": "ok",
+        "service": "Q-BioVision API",
+        "version": API_VERSION,
+        "demo_mode": DEMO_MODE,
+    }
+
+
 @app.get("/api/datasets/samples", tags=["Datasets"])
 async def get_dataset_samples():
     """Return metadata for all supported demo datasets."""
@@ -138,10 +152,12 @@ async def get_dataset_samples():
         raise HTTPException(status_code=500, detail=str(exc))
 
 
-@app.post("/api/preprocess", tags=["Preprocessing"])
+@app.post("/api/encode", tags=["Preprocessing"])
+@app.post("/api/preprocess", tags=["Preprocessing"])   # legacy alias
 async def preprocess_image(
     file: Optional[UploadFile] = File(None),
     dataset_name: Optional[str] = Form(None),
+    dataset: Optional[str] = Form(None),          # alias accepted from the UI
     n_qubits: int = Form(DEFAULT_N_QUBITS),
 ):
     """
@@ -149,6 +165,7 @@ async def preprocess_image(
     Returns: original image (base64), quantum feature map, patch grid, quantum features.
     """
     n_qubits = _clamp_qubits(n_qubits)
+    dataset_name = dataset_name or dataset
 
     try:
         from preprocessing import encode_image_to_qubits, create_patch_grid, load_image
@@ -193,6 +210,87 @@ async def preprocess_image(
     except Exception as exc:
         logger.error("Preprocessing error: %s", exc)
         raise HTTPException(status_code=500, detail=f"Preprocessing failed: {exc}")
+
+
+@app.post("/api/analyze", tags=["Preprocessing"])
+async def analyze_image(
+    file: Optional[UploadFile] = File(None),
+    dataset_name: Optional[str] = Form(None),
+    dataset: Optional[str] = Form(None),
+    n_qubits: int = Form(DEFAULT_N_QUBITS),
+    architecture: str = Form("VQC"),
+):
+    """
+    One-shot pipeline used by the "Encode & Analyze" button:
+    encode the image into a quantum feature map AND run classification.
+
+    Returns the full /api/encode payload merged with the prediction fields.
+    Classification failures are non-fatal - the encoding is still returned.
+    """
+    n_qubits = _clamp_qubits(n_qubits)
+    dataset_name = dataset_name or dataset or "breakhis"
+
+    # Read the upload once; UploadFile can only be consumed a single time.
+    image_bytes = await file.read() if (file is not None and file.filename) else None
+    if image_bytes is not None:
+        await file.seek(0)
+
+    encoding = await preprocess_image(
+        file=file,
+        dataset_name=dataset_name,
+        dataset=None,
+        n_qubits=n_qubits,
+    )
+
+    result = dict(encoding)
+    result["architecture"] = architecture
+
+    try:
+        from preprocessing import load_image, encode_image_to_qubits
+        from dataset_manager import generate_synthetic_dataset
+        from quantum_models import (
+            QuanvolutionalNN,
+            QuantumSVClassifier,
+            VariationalQuantumClassifier,
+        )
+
+        features = np.array([encoding["quantum_features"]])
+        cfg = DATASET_CONFIGS.get(dataset_name, {})
+        n_classes = cfg.get("n_classes", 2)
+        labels = cfg.get("labels", {0: "Class 0", 1: "Class 1"})
+
+        data = generate_synthetic_dataset(
+            n_samples=60, n_qubits=n_qubits, n_classes=n_classes
+        )
+
+        arch = architecture.upper()
+        if arch == "QCNN":
+            model = QuanvolutionalNN(n_qubits=n_qubits, n_layers=2)
+        elif arch == "QSVC":
+            model = QuantumSVClassifier(n_qubits=n_qubits)
+        else:
+            model = VariationalQuantumClassifier(n_qubits=n_qubits, n_layers=2)
+
+        model.fit(data["X_train"], data["y_train"])
+        pred = model.predict(features)
+
+        prediction = int(pred["predictions"][0])
+        probs = pred["probabilities"][0] if pred.get("probabilities") else [0.5, 0.5]
+
+        result.update({
+            "prediction": prediction,
+            "label_name": labels.get(prediction, f"Class {prediction}"),
+            "confidence": round(float(max(probs)), 4),
+            "probabilities": {
+                labels.get(i, f"Class {i}"): round(float(p), 4)
+                for i, p in enumerate(probs)
+            },
+        })
+    except Exception as exc:                      # noqa: BLE001
+        logger.warning("Analyze: classification skipped (%s)", exc)
+        result["prediction_error"] = str(exc)
+
+    return result
 
 
 @app.post("/api/circuit/build", tags=["Quantum"])
@@ -432,13 +530,31 @@ async def generate_report(req: ReportRequest):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Friendly 404 — tells the caller which routes actually exist
+# ──────────────────────────────────────────────────────────────────────────────
+@app.exception_handler(404)
+async def not_found_handler(request, exc):       # noqa: ANN001
+    routes = sorted(
+        r.path for r in app.routes if getattr(r, "path", "").startswith("/api")
+    )
+    return JSONResponse(
+        status_code=404,
+        content={
+            "detail": f"No API route matches {request.method} {request.url.path}",
+            "available_routes": routes,
+            "hint": "See /docs for the interactive OpenAPI schema.",
+        },
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Entry Point
 # ──────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     uvicorn.run(
         "app:app",
         host="0.0.0.0",
-        port=8000,
-        reload=True,
+        port=API_PORT,
+        reload=bool(os.environ.get("RELOAD", "1") == "1"),
         log_level="info",
     )

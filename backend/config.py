@@ -74,10 +74,33 @@ PATCH_SIZE: int = 2            # Patch grid dimension (2x2 = 4 patches)
 # ──────────────────────────────────────────────────────────────────────────────
 # API / CORS
 # ──────────────────────────────────────────────────────────────────────────────
-CORS_ORIGINS: list = [
-    "http://localhost:5173",   # Vite dev server (React / Vue)
+# Explicit origins always allowed (local development).
+_DEFAULT_CORS_ORIGINS: list = [
+    "http://localhost:5173",   # Vite dev server
+    "http://127.0.0.1:5173",
     "http://localhost:3000",   # CRA / Next.js dev server
+    "http://localhost:4173",   # vite preview
 ]
+
+# Extra origins from the environment, comma separated.
+#   CORS_ORIGINS="https://q-biovision.vercel.app,https://qbiovision.com"
+_env_origins = [
+    o.strip().rstrip("/")
+    for o in os.environ.get("CORS_ORIGINS", "").split(",")
+    if o.strip()
+]
+
+CORS_ORIGINS: list = _DEFAULT_CORS_ORIGINS + _env_origins
+
+# Regex that matches every Vercel production + preview deployment URL,
+# e.g. https://q-biovision-git-main-user.vercel.app
+CORS_ORIGIN_REGEX: str = os.environ.get(
+    "CORS_ORIGIN_REGEX",
+    r"https://.*\.vercel\.app",
+)
+
+# Port the API binds to (Render/Railway/Fly inject $PORT).
+API_PORT: int = int(os.environ.get("PORT", "8000"))
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Feature Extraction

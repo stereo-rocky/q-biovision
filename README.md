@@ -102,20 +102,42 @@ Swagger UI: http://localhost:8000/docs
 ### Frontend Setup
 
 ```bash
-cd QFF/frontend
 npm install
+cp .env.example .env.local     # leave VITE_API_URL empty for the dev proxy
 npm run dev
 ```
 
-App: http://localhost:5173
+App: http://localhost:5173 — Vite proxies `/api` to the backend on :8000.
 
 ### Environment Variables (backend/.env)
 
 ```env
 DEMO_MODE=true        # Use cached results for instant demo
 RANDOM_SEED=42
+PORT=8000
+CORS_ORIGINS=https://your-app.vercel.app   # comma-separated
 # IBMQ_API_TOKEN=     # Optional: real IBM hardware
 ```
+
+### Environment Variables (frontend, `.env.local`)
+
+```env
+# Backend ORIGIN only, no trailing /api. Empty = same-origin
+# (Vite proxy in dev, vercel.json rewrites in production).
+VITE_API_URL=
+VITE_DEV_API_PROXY=http://localhost:8000
+```
+
+> This is a **Vite** app: only `VITE_`-prefixed vars reach the browser, and they are
+> inlined **at build time** — change one on Vercel and you must redeploy.
+
+### Deploying to Vercel
+
+The frontend deploys to Vercel; the FastAPI backend must be hosted elsewhere
+(Render blueprint + Dockerfile included) because Qiskit/Torch exceed Vercel's
+serverless limits. Point `/api/*` at it via the rewrite in `vercel.json`.
+
+See **[DEPLOYMENT.md](./DEPLOYMENT.md)** for the full walkthrough and 404 troubleshooting.
 
 ---
 
@@ -149,8 +171,11 @@ Toggle ZNE and TREX. Compare ideal vs noisy vs mitigated expectation values.
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/` | GET | Health check |
+| `/api/health` | GET | Health check (used by frontend + Render) |
 | `/api/datasets/samples` | GET | Demo dataset metadata |
-| `/api/preprocess` | POST | Image -> quantum features |
+| `/api/encode` | POST | Image -> quantum features |
+| `/api/analyze` | POST | Encode **and** classify in one call |
+| `/api/preprocess` | POST | Legacy alias of `/api/encode` |
 | `/api/circuit/build` | POST | Build + render circuit |
 | `/api/model/train` | POST | Train quantum model |
 | `/api/model/predict` | POST | Run inference |
