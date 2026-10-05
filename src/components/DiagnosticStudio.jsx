@@ -252,9 +252,8 @@ export default function DiagnosticStudio({ globalState, updateGlobalState }) {
       if (uploadedFile) {
         formData.append('file', uploadedFile)
       } else {
-        // For dataset presets, send a sentinel value
-        formData.append('dataset', selectedDataset)
-        formData.append('use_sample', 'true')
+        // For dataset presets the backend expects 'dataset_name'
+        formData.append('dataset_name', selectedDataset)
       }
       formData.append('n_qubits', String(nQubits))
 
@@ -264,7 +263,7 @@ export default function DiagnosticStudio({ globalState, updateGlobalState }) {
       setSuccess(true)
       setTimeout(() => setSuccess(false), 4000)
     } catch (err) {
-      setError(err.message || 'Preprocessing failed. Is the backend running?')
+      setError(err.message || 'Encoding failed. Is the Q-BioVision backend running?')
     } finally {
       setIsLoading(false)
     }
